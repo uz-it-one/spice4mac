@@ -1,0 +1,7 @@
+brew "glib"
+brew "pixman"
+brew "openssl@3"
+brew "jpeg-turbo"
+brew "opus"
+brew "libffi"
+brew "ca-certificates"

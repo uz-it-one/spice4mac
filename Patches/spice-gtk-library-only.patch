@@ -1,0 +1,13 @@
+diff --git a/meson.build b/meson.build
+index 559ff33..89004aa 100644
+--- a/meson.build
++++ b/meson.build
+@@ -439,7 +439,7 @@ configure_file(output : 'config.h',
+ # Subdirectories
+ #
+ subdir('src')
+-subdir('tools')
++# SPICE4Mac builds the client library only; upstream CLI tools are not shipped.
+ subdir('tests')
+ if build_machine.system() == 'windows'
+   message('Disabling documentation while building on Windows')

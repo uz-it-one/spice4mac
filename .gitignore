@@ -1,0 +1,46 @@
+# Generated binaries, dependencies, caches and local test evidence
+.build/
+.build-native/
+dist/
+Artifacts/
+.swiftpm/
+DerivedData/
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
+.AppleDouble
+# Local IDE, assistant and machine configuration
+.idea/
+.vscode/
+.codex/
+.agents/
+.claude/
+*.xcuserstate
+xcuserdata/
+.env
+.env.*
+!.env.example
+# Connection files and credentials must never be committed
+*.vv
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+credentials.json
+# Historical local working notes, not public product documentation
+docs/research/
+docs/native-macos-port-plan.md
+docs/implementation-status.md
+.ssh/
+.aws/
+.netrc
+.npmrc
+*.crt
+*.cer
+*.p8
+*.sqlite*
+*.db
+*.zip
+*.dmg

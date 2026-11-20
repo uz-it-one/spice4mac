@@ -1,0 +1,14 @@
+diff --git a/src/spice-channel.c b/src/spice-channel.c
+index 77691c5..5656a1e 100644
+--- a/src/spice-channel.c
++++ b/src/spice-channel.c
+@@ -2739,6 +2739,9 @@ connected:
+     if ((rc != 0)
+ #ifdef ENOTSUP
+         && (errno != ENOTSUP)
++#endif
++#ifdef EOPNOTSUPP
++        && (errno != EOPNOTSUPP)
+ #endif
+         ) {
+         g_warning("%s: could not set sockopt TCP_NODELAY: %s", c->name,

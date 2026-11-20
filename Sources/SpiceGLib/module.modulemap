@@ -1,0 +1,5 @@
+module SpiceGLib [system] {
+ header "shim.h"
+ link "spice-client-glib-2.0"
+ export *
+}
