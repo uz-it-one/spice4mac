@@ -37,7 +37,22 @@ jobs:
         env:
           HOMEBREW_NO_AUTO_UPDATE: '1'
         run: brew bundle --file Brewfile
+      - name: Identify native build environment
+        id: native-environment
+        run: python3 Build/native-cache-key.py >> "$GITHUB_OUTPUT"
+      - name: Restore native dependencies
+        id: native-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          key: native-v1-${{ steps.native-environment.outputs.key }}-${{ hashFiles('Brewfile', 'Dependencies/**', 'Patches/**', 'Build/build-dependencies.py', 'Build/native-env.sh', 'Build/native-cache-key.py') }}
+          path: |
+            .build-native/prefix
+            .build-native/tools
+            .build-native/venv
+            .build-native/sources
+            .build-native/build-*
       - name: Build protocol dependencies
+        if: steps.native-cache.outputs.cache-hit != 'true'
         run: python3 Build/build-dependencies.py --server 2>&1 | tee Artifacts/dependencies.log
       - name: Build and package application
         run: ./Build/build-app.sh 2>&1 | tee Artifacts/build.log
@@ -46,22 +61,20 @@ jobs:
       - name: Assemble release assets
         run: |
           python3 Build/archive-app.py
-          python3 Build/archive-sources.py
+          python3 Build/verify-app.py
           python3 Build/release-manifest.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-assets
           path: |
             dist/Spice4Mac-*.zip
-            dist/Spice4Mac-*-dependency-sources.tar.gz
             dist/SHA256SUMS
-            dist/native-audit.json
           if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: build-logs
-          path: Artifacts/
+          path: Artifacts/*.log
   publish:
     if: startsWith(github.ref, 'refs/tags/')
     needs: build

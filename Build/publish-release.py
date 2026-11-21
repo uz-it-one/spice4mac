@@ -5,6 +5,9 @@ from version import version
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 v=version();tag=os.environ['GITHUB_REF_NAME'];repo=os.environ['GH_REPO']
 assets=ROOT/'release-assets'
+allowed=[assets/f'Spice4Mac-{v}-arm64.zip',assets/'SHA256SUMS']
+if set(assets.iterdir())!=set(allowed):
+    raise SystemExit('Unexpected release asset; only the application ZIP and checksum are allowed.')
 subprocess.run(['sha256sum','--check','SHA256SUMS'],cwd=assets,check=True)
 query=subprocess.run(['gh','release','view',tag,'--json','isDraft'],capture_output=True,text=True)
 if query.returncode==0 and not json.loads(query.stdout)['isDraft']:
@@ -21,7 +24,8 @@ notes=f'''Apple Silicon용 SPICE 원격 데스크톱 클라이언트 Spice4Mac {
 단일 화면을 지원하며 USB·마이크·파일 공유·SASL·다중 모니터는 지원하지 않습니다.
 
 자체 코드는 MIT, 외부 라이브러리는 각자의 라이선스를 따릅니다.
-의존성 소스와 SHA256SUMS를 함께 제공합니다.
+실행에 필요한 라이브러리는 앱 안에 포함되어 별도 설치가 필요하지 않습니다.
+ZIP과 SHA256SUMS를 제공합니다.
 
 Build commit: {os.environ['GITHUB_SHA']}
 '''
@@ -29,5 +33,5 @@ with tempfile.NamedTemporaryFile(mode='w',suffix='.md') as file:
     file.write(notes);file.flush()
     if query.returncode!=0:
         subprocess.run(['gh','release','create',tag,'--verify-tag','--draft','--title','Spice4Mac '+v,'--notes-file',file.name],check=True)
-    subprocess.run(['gh','release','upload',tag,*map(str,sorted(assets.iterdir())),'--clobber'],check=True)
+    subprocess.run(['gh','release','upload',tag,*map(str,allowed),'--clobber'],check=True)
     subprocess.run(['gh','release','edit',tag,'--draft=false','--notes-file',file.name],check=True)

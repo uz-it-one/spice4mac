@@ -70,8 +70,6 @@ def main():
                 if f.is_file() and ('LICENSE' in f.name.upper() or 'COPYING' in f.name.upper()):shutil.copy2(f,licenses/(parts[n+1]+'-'+f.name))
     (ROOT/'.build-native/native-audit-private.json').write_text(json.dumps(audit,indent=2)+'\n')
     audit=[{**{k:v for k,v in row.items() if k!='source'},'source_name':pathlib.Path(row['source']).name} for row in audit]
-    (RES/'native-audit.json').write_text(json.dumps(audit,indent=2)+'\n')
-    shutil.copy2(ROOT/'Dependencies/native-lock.json',RES/'native-lock.json')
     shutil.copy2(ROOT/'LICENSE',RES/'LICENSE-Spice4Mac')
     shutil.copy2(ROOT/'docs/THIRD_PARTY.md',RES/'THIRD_PARTY.md')
     run(['codesign','--force','--sign','-',APP])

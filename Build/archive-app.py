@@ -21,14 +21,11 @@ def main():
         stage.mkdir()
         subprocess.run(["ditto", str(app), str(stage / app.name)], check=True)
         shutil.copy2(cli, stage / cli.name)
-        for path in [ROOT / "README.md", ROOT / "LICENSE", DIST / "native-audit.json"]:
+        for path in [ROOT / "README.md", ROOT / "LICENSE"]:
             shutil.copy2(path, stage / path.name)
         (stage / "docs").mkdir()
         for name in ["CLI.md", "BUILDING.md", "THIRD_PARTY.md"]:
             shutil.copy2(ROOT / "docs" / name, stage / "docs" / name)
-        # README commands also work after extracting: the package uses a flat layout.
-        readme = stage / "README.md"
-        readme.write_text("이 ZIP에는 실행 파일과 문서가 포함됩니다. 빌드·시험 명령은 원본 소스 저장소에서 실행하십시오.\n\n" + readme.read_text().replace("./dist/", "./").replace("`dist/", "`"))
         if archive.exists():
             archive.unlink()
         subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(stage), str(archive)], check=True)
