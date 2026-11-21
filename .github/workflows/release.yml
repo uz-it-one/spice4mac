@@ -37,22 +37,7 @@ jobs:
         env:
           HOMEBREW_NO_AUTO_UPDATE: '1'
         run: brew bundle --file Brewfile
-      - name: Identify native build environment
-        id: native-environment
-        run: python3 Build/native-cache-key.py >> "$GITHUB_OUTPUT"
-      - name: Restore native dependencies
-        id: native-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          key: native-v1-${{ steps.native-environment.outputs.key }}-${{ hashFiles('Brewfile', 'Dependencies/**', 'Patches/**', 'Build/build-dependencies.py', 'Build/native-env.sh', 'Build/native-cache-key.py') }}
-          path: |
-            .build-native/prefix
-            .build-native/tools
-            .build-native/venv
-            .build-native/sources
-            .build-native/build-*
       - name: Build protocol dependencies
-        if: steps.native-cache.outputs.cache-hit != 'true'
         run: python3 Build/build-dependencies.py --server 2>&1 | tee Artifacts/dependencies.log
       - name: Build and package application
         run: ./Build/build-app.sh 2>&1 | tee Artifacts/build.log
