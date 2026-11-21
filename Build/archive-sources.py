@@ -8,6 +8,7 @@ DIST=ROOT/'dist'
 def output(args):return subprocess.check_output(list(map(str,args)),text=True).strip()
 def main():
     lock=json.loads((ROOT/'Dependencies/native-lock.json').read_text())
+    pinned_patches=json.loads((ROOT/'Dependencies/homebrew-patches.json').read_text())
     manifest=[]
     with tempfile.TemporaryDirectory(prefix='spice4mac-sources-') as temporary:
         stage=pathlib.Path(temporary)/'dependency-sources';stage.mkdir()
@@ -53,7 +54,7 @@ def main():
             text=recipe.read_text();dest=stage/'homebrew'/keg.parent.name/keg.name;dest.mkdir(parents=True)
             shutil.copy2(recipe,dest/recipe.name)
             receipt=json.loads((keg/'INSTALL_RECEIPT.json').read_text())
-            tap=receipt['source']['tap_git_head']
+            tap=receipt.get('source',{}).get('tap_git_head')
             # Quoted URL followed by SHA before another URL: stable source and resources/patches.
             pairs=re.findall(r'^\s*url "([^"\n]+)"(?:(?!^\s*url ).)*?^\s*sha256 "([0-9a-f]{64})"',text,re.M|re.S)
             if not pairs:raise RuntimeError('No auditable source URL: '+recipe.name)
@@ -62,7 +63,13 @@ def main():
                 filename=url.split('?')[0].rstrip('/').split('/')[-1]
                 download(url,digest,dest/(str(n)+'-'+filename))
             for patch in re.findall(r'^\s*file "(Patches/[^"\n]+)"',text,re.M):
-                download('https://raw.githubusercontent.com/Homebrew/homebrew-core/'+tap+'/'+patch,None,dest/patch)
+                if tap:
+                    download('https://raw.githubusercontent.com/Homebrew/homebrew-core/'+tap+'/'+patch,None,dest/patch)
+                else:
+                    pinned=pinned_patches.get(keg.parent.name+'/'+patch)
+                    if not pinned or pinned['source_sha256']!=pairs[0][1]:
+                        raise RuntimeError('Missing pinned Homebrew patch for '+keg.parent.name+'/'+patch)
+                    download(pinned['url'],pinned['sha256'],dest/patch)
         (stage/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
         target=DIST/('Spice4Mac-'+version()+'-dependency-sources.tar.gz')
         with tarfile.open(target,'w:gz') as tar:tar.add(stage,arcname=stage.name)

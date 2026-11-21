@@ -30,6 +30,7 @@ def main():
         if src.exists():
             dest=RES/'gstreamer-1.0'/name;dest.parent.mkdir(exist_ok=True);shutil.copy2(src,dest);queue.append((src,dest))
     for original,dest in queue:
+        dest.chmod(dest.stat().st_mode | 0o200)
         for dep in dependencies(original):
             if system(dep):continue
             src=resolve(dep,original).resolve()
@@ -48,6 +49,7 @@ def main():
         arch=run(['lipo','-archs',dest]).strip()
         if 'arm64' not in arch:raise RuntimeError('Not arm64: '+str(dest))
         audit.append({'file':str(dest.relative_to(APP)),'source':str(original),'architectures':arch,'minimum_os':versions,'sha256_source':hashlib.sha256(original.read_bytes()).hexdigest()})
+        run(['strip','-S',dest])
         run(['codesign','--force','--sign','-',dest])
     minimum=max(['26.0']+[v for row in audit for v in row['minimum_os']],key=lambda s:tuple(map(int,s.split('.'))))
     info={'CFBundleExecutable':'Spice4MacApp','CFBundleIdentifier':'org.spice4mac.client','CFBundleName':'Spice4Mac','CFBundleDisplayName':'Spice4Mac','CFBundlePackageType':'APPL','CFBundleShortVersionString':version(),'CFBundleVersion':version(),'LSMinimumSystemVersion':minimum,'NSHighResolutionCapable':True,'NSPrincipalClass':'NSApplication'}
@@ -74,7 +76,7 @@ def main():
     shutil.copy2(ROOT/'docs/THIRD_PARTY.md',RES/'THIRD_PARTY.md')
     run(['codesign','--force','--sign','-',APP])
     run(['codesign','--verify','--deep','--strict',APP])
-    shutil.copy2(ROOT/'.build/release/spice4mac',DIST/'spice4mac');run(['codesign','--force','--sign','-',DIST/'spice4mac'])
+    shutil.copy2(ROOT/'.build/release/spice4mac',DIST/'spice4mac');run(['strip','-S',DIST/'spice4mac']);run(['codesign','--force','--sign','-',DIST/'spice4mac'])
     for _,dest in queue:
         if any(not system(d) and not d.startswith('@rpath/') for d in dependencies(dest)):raise RuntimeError('Non-relocatable dependency: '+str(dest))
     (DIST/'native-audit.json').write_text(json.dumps({'minimum_os':minimum,'binaries':audit},indent=2)+'\n')

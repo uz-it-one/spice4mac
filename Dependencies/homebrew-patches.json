@@ -1,0 +1,7 @@
+{
+  "glib/Patches/glib/hardcoded-paths.diff": {
+    "source_sha256": "93c941aa17d5eb1d53fe838365f29a8b4e539c222a256d974ec8f30fc413e396",
+    "url": "https://raw.githubusercontent.com/Homebrew/homebrew-core/2b1c5d8ca5b8399a327fd0979db34e882ced81bf/Patches/glib/hardcoded-paths.diff",
+    "sha256": "d846efd0bf62918350da94f850db33b0f8727fece9bfaf8164566e3094e80c97"
+  }
+}
