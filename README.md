@@ -26,6 +26,8 @@ Apple Silicon Mac에서 libvirt/QEMU 가상 머신의 SPICE 콘솔을 여는 네
 | `⌃⌘F` | 전체 화면 전환 |
 | `Control + Option` | 원격 입력 해제 |
 
+게스트가 서버 마우스 모드(SPICE agent 없음)이면 클릭 시 포인터를 잠가 상대 이동을 전달하며, `Control + Option`으로 해제합니다. 마우스 뒤로/앞으로 버튼은 게스트로 전달하지만, SPICE 프로토콜에 가로 스크롤 버튼이 없어 가로 스크롤은 전달하지 않습니다.
+
 ## CLI 사용 (선택)
 
 ZIP에 포함된 `spice4mac` 바이너리로 터미널에서도 연결할 수 있습니다. 앱이 같은 폴더나 `/Applications`에 있으면 자동으로 실행됩니다.
@@ -49,7 +51,7 @@ ZIP에 포함된 `spice4mac` 바이너리로 터미널에서도 연결할 수 �
 
 ## 개발자 안내
 
-소스에서 직접 빌드하거나 릴리스 패키지를 만드는 방법은 [빌드 안내](docs/BUILDING.md)를 참고하십시오.
+소스에서 직접 빌드하거나 릴리스 패키지를 만드는 방법은 [빌드 안내](docs/BUILDING.md)를 참고하십시오. 실제 VM 수동 검증 항목은 [실제 VM 체크리스트](docs/REAL_VM_CHECKLIST.md)에 있습니다.
 
 ## 라이선스
 

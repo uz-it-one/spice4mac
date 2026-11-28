@@ -33,7 +33,8 @@ try:
             assert launcher.poll() is None, 'CLI failed to hold shell'
             lifecycle_server.terminate();lifecycle_server.wait(timeout=3)
             code=launcher.wait(timeout=10)
-            assert code in (0,2), f'Unexpected disconnect exit: {code}'
+            # 5: the server ended the session; 2: the network dropped it first.
+            assert code in (2,5), f'Unexpected disconnect exit: {code}'
             results.append({'name':'cli-holds-shell-and-exits-on-disconnect','passed':True,'exit':code})
         finally:
             try:os.killpg(launcher.pid,signal.SIGTERM)

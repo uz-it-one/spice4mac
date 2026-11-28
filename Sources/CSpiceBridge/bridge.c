@@ -25,6 +25,7 @@ struct SFSession {
  guint frame_source;
  gboolean diagnostics;
  gint64 stats_start, last_present;
+ int dirty_x0, dirty_y0, dirty_x1, dirty_y1; /* union since the last present; empty when x1<=x0 */
  unsigned invalidations, frames;
 };
 static pthread_once_t once = PTHREAD_ONCE_INIT;
@@ -64,6 +65,10 @@ static gboolean present(gpointer data) {
  SFSession *s=data; s->frame_source=0;
  if (!s->canvas || s->width<=0 || s->height<=0) return G_SOURCE_REMOVE;
  s->frames++;s->last_present=g_get_monotonic_time();
+ int x0=MAX(0,s->dirty_x0), y0=MAX(0,s->dirty_y0), x1=MIN(s->width,s->dirty_x1), y1=MIN(s->height,s->dirty_y1);
+ if(x1<=x0 || y1<=y0) { x0=0; y0=0; x1=s->width; y1=s->height; }
+ s->dirty_x0=s->dirty_y0=s->dirty_x1=s->dirty_y1=0;
+ emit(s,SF_DIRTY,x0,y0,x1-x0,y1-y0,NULL,0);
  /* The callback copies borrowed bytes synchronously. Avoid an intermediate full
     frame allocation and per-pixel alpha loop for the common packed 32-bit canvas. */
  if (is_32bit(s->format) && s->stride==s->width*4) {
@@ -75,9 +80,16 @@ static gboolean present(gpointer data) {
  if(!s->ready) {s->ready=1;state(s,"Ready");}
  return G_SOURCE_REMOVE;
 }
+static void add_dirty(SFSession *s,int x,int y,int w,int h) {
+ if(w<=0 || h<=0) return;
+ if(s->dirty_x1<=s->dirty_x0) { s->dirty_x0=x; s->dirty_y0=y; s->dirty_x1=x+w; s->dirty_y1=y+h; return; }
+ s->dirty_x0=MIN(s->dirty_x0,x); s->dirty_y0=MIN(s->dirty_y0,y);
+ s->dirty_x1=MAX(s->dirty_x1,x+w); s->dirty_y1=MAX(s->dirty_y1,y+h);
+}
 static void invalidate(SpiceChannel *ch,int x,int y,int w,int h,gpointer data) {
- (void)ch;(void)x;(void)y;(void)w;(void)h;
+ (void)ch;
  SFSession *s=data;
+ add_dirty(s,x,y,w,h);
  if(s->diagnostics){
   s->invalidations++;gint64 now=g_get_monotonic_time();double elapsed=(now-s->stats_start)/1000000.0;
   if(elapsed>=1){fprintf(stderr,"protocol invalidations_per_sec=%.1f published_fps=%.1f size=%dx%d\n",s->invalidations/elapsed,s->frames/elapsed,s->width,s->height);s->stats_start=now;s->invalidations=0;s->frames=0;}
@@ -95,6 +107,7 @@ static void primary(SpiceChannel *ch,int format,int w,int h,int stride,int shmid
   error(s,"Unsupported or oversized display surface"); return;
  }
  s->width=w;s->height=h;s->stride=stride;s->format=format;s->canvas=pixels;
+ s->dirty_x0=s->dirty_y0=s->dirty_x1=s->dirty_y1=0;
  /* Wait for display-invalidate: a newly allocated surface is not a rendered frame. */
 }
 static void primary_destroy(SpiceChannel *ch,gpointer data) {
