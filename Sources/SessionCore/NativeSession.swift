@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import AppKit
 import AVFoundation
+import Accelerate
 import ConnectionCore
 import CSpiceBridge
 
@@ -9,6 +10,18 @@ public struct RemoteFrame: Sendable {
     public let width, height, stride: Int
     public let pixels: Data
     public let generation: UInt64
+    /// Region changed since the previously delivered frame. `pixels` always holds the whole surface.
+    public let dirty: PixelRect
+    public init(width: Int, height: Int, stride: Int, pixels: Data, generation: UInt64, dirty: PixelRect? = nil) {
+        self.width = width; self.height = height; self.stride = stride; self.pixels = pixels; self.generation = generation
+        self.dirty = dirty ?? .full(width: width, height: height)
+    }
+}
+
+public enum SessionState: String, Sendable {
+    case idle = "Idle", connecting = "Connecting", negotiating = "Negotiating", migrating = "Migrating"
+    case ready = "Ready", disconnected = "Disconnected", failed = "Failed"
+    public var isConnecting: Bool { self == .connecting || self == .negotiating }
 }
 public struct RemoteCursor: Sendable {
     public let width, height, hotX, hotY: Int
@@ -24,13 +37,28 @@ private final class CallbackSink: @unchecked Sendable {
     private var scheduled = false
     private var count: UInt64 = UInt64.random(in: 1...(UInt64.max / 2))
     private var audioPending = 0
+    private var announcedDirty: PixelRect?
     init(owner: NativeSession, epoch: UUID) { self.owner = owner; self.epoch = epoch }
+    /// Main-queue blocks run in submission order, unlike unstructured Tasks, so state,
+    /// surface and frame callbacks reach the session in the order the protocol emitted them.
+    private func onMain(_ body: @escaping @MainActor () -> Void) {
+        DispatchQueue.main.async { MainActor.assumeIsolated(body) }
+    }
+    /// SF_DIRTY precedes each SF_FRAME on the protocol thread.
+    func dirty(x: Int, y: Int, width: Int, height: Int) {
+        lock.lock(); announcedDirty = PixelRect(x: x, y: y, width: width, height: height); lock.unlock()
+    }
     func frame(width: Int, height: Int, stride: Int, pixels: Data) {
         lock.lock(); count &+= 1
-        pending = RemoteFrame(width: width, height: height, stride: stride, pixels: pixels, generation: count)
+        let full = PixelRect.full(width: width, height: height)
+        var dirty = (announcedDirty ?? full).clamped(width: width, height: height)
+        announcedDirty = nil
+        // A frame not yet taken by the main thread is replaced, so carry its region forward.
+        if let previous = pending { dirty = previous.width == width && previous.height == height ? previous.dirty.union(dirty) : full }
+        pending = RemoteFrame(width: width, height: height, stride: stride, pixels: pixels, generation: count, dirty: dirty)
         let shouldSchedule = !scheduled; scheduled = true; lock.unlock()
         if shouldSchedule {
-            Task { @MainActor [self] in
+            onMain { [self] in
                 let frame = takeFrame()
                 guard let owner, owner.epoch == epoch else { return }
                 owner.frame = frame
@@ -41,7 +69,7 @@ private final class CallbackSink: @unchecked Sendable {
     private func completeAudio() { lock.lock(); audioPending -= 1; lock.unlock() }
     func event(_ type: Int32, _ a: Int32, _ b: Int32, _ c: Int32, _ d: Int32, _ data: Data) {
         if type == SF_AUDIO_DATA { lock.lock(); if audioPending >= 16 { lock.unlock(); return }; audioPending += 1; lock.unlock() }
-        Task { @MainActor [self] in
+        onMain { [self] in
             if type == SF_AUDIO_DATA { completeAudio() }
             guard let owner, owner.epoch == epoch else { return }
             owner.receive(type, Int(a), Int(b), Int(c), Int(d), data)
@@ -54,6 +82,7 @@ private let receiveNative: @convention(c) (UnsafeMutableRawPointer?, Int32, Int3
     if type == SF_DESTROYED { unmanaged.release(); return }
     let sink = unmanaged.takeUnretainedValue()
     let data = bytes.map { Data(bytes: $0, count: size) } ?? Data()
+    if type == SF_DIRTY { sink.dirty(x: Int(a), y: Int(b), width: Int(c), height: Int(d)); return }
     if type == SF_FRAME { sink.frame(width: Int(a), height: Int(b), stride: Int(c), pixels: data) }
     else { sink.event(type, a, b, c, d, data) }
 }
@@ -62,7 +91,7 @@ private let receiveNative: @convention(c) (UnsafeMutableRawPointer?, Int32, Int3
 public final class NativeSession: ObservableObject {
     @Published public var fitToWindow = true
     @Published public var fullScreen = false
-    @Published public private(set) var state = "Idle"
+    @Published public private(set) var state = SessionState.idle
     @Published public private(set) var error: String?
     public let frames = CurrentValueSubject<RemoteFrame?, Never>(nil)
     public fileprivate(set) var frame: RemoteFrame? {
@@ -90,9 +119,9 @@ public final class NativeSession: ObservableObject {
     public var backendVersion: String { String(cString: sf_backend_version()) }
 
     public func connect(_ options: ConnectionOptions) {
-        disconnect()
-        do { try options.validate() } catch { self.error = error.localizedDescription; state = "Failed"; return }
-        self.options = options; self.error = nil; state = "Connecting"
+        teardown()
+        do { try options.validate() } catch { self.error = error.localizedDescription; state = .failed; return }
+        self.options = options; self.error = nil; state = .connecting
         let strings = [options.host, options.port.map(String.init), options.tlsPort.map(String.init), options.password,
                        options.caFile, options.caPEM, options.certificateSubject, options.proxy].map { $0.flatMap { strdup($0) } }
         defer { strings.forEach { free($0) } }
@@ -107,12 +136,15 @@ public final class NativeSession: ObservableObject {
             }
         }
     }
-    public func disconnect() {
+    public func disconnect() { teardown(); state = .idle }
+    /// Releases the native session without announcing a state, so failures and reconnects
+    /// do not publish a transient Idle.
+    private func teardown() {
         epoch = UUID()
         resizeTask?.cancel(); resizeTask = nil; requestedSize = nil
         clipboardTimer?.invalidate(); clipboardTimer = nil
         if let handle { sf_session_destroy(handle); self.handle = nil }
-        stopAudio(); frame = nil; cursor = nil; connected = false; agentConnected = false; serverMouse = false; state = "Idle"
+        stopAudio(); frame = nil; cursor = nil; connected = false; agentConnected = false; serverMouse = false
     }
     public func sendKey(_ code: UInt32, pressed: Bool) { if let handle { sf_key(handle, code, pressed ? 1 : 0) } }
     public func pointer(x: Int, y: Int, buttons: Int) { if let handle { sf_pointer(handle, Int32(clamping:x), Int32(clamping:y), Int32(buttons), 0) } }
@@ -140,11 +172,12 @@ public final class NativeSession: ObservableObject {
     func receive(_ type: Int32, _ a: Int, _ b: Int, _ c: Int, _ d: Int, _ data: Data) {
         switch type {
         case Int32(SF_STATE):
-            state = String(decoding:data,as:UTF8.self); connected = state == "Ready"
-            if state == "Disconnected" { stopAudio(); frame = nil; agentConnected = false }
+            guard let next = SessionState(rawValue: String(decoding:data,as:UTF8.self)), next != state else { return }
+            state = next; connected = next == .ready
+            if next == .disconnected { stopAudio(); frame = nil; agentConnected = false }
         case Int32(SF_ERROR):
             let message = String(decoding:data,as:UTF8.self)
-            disconnect(); error = message; state = "Failed"
+            teardown(); error = message; state = .failed
         case Int32(SF_CURSOR): cursor = RemoteCursor(width:a,height:b,hotX:c,hotY:d,pixels:data,hidden:a==0)
         case Int32(SF_AGENT): agentConnected = a != 0
         case Int32(SF_MOUSE): serverMouse = a != 0
@@ -171,18 +204,34 @@ public final class NativeSession: ObservableObject {
     private func stopAudio() { audioEpoch = UUID(); audioPlayer?.stop(); audioEngine?.stop(); audioPlayer = nil; audioEngine = nil; audioFormat = nil; queuedAudio = 0 }
     private func playAudio(_ data:Data) {
         guard let player = audioPlayer,let format = audioFormat,queuedAudio < 12 else { return }
-        let channels = Int(format.channelCount), count = data.count / (2 * Int(format.channelCount))
+        let channels = Int(format.channelCount), count = data.count / (2 * channels)
         guard count > 0,let buffer = AVAudioPCMBuffer(pcmFormat:format,frameCapacity:AVAudioFrameCount(count)),let output = buffer.floatChannelData else { return }
         buffer.frameLength = AVAudioFrameCount(count)
-        data.withUnsafeBytes { raw in
-            for i in 0..<count { for channel in 0..<channels {
-                let value = raw.loadUnaligned(fromByteOffset:(i*channels+channel)*2,as:Int16.self)
-                output[channel][i] = Float(Int16(littleEndian:value)) / 32768
-            } }
-        }
+        Self.convertPCM16(data, channels: channels, frames: count, into: output)
         queuedAudio += 1; let current = audioEpoch
         player.scheduleBuffer(buffer,completionCallbackType:.dataPlayedBack) { [weak self] _ in
             Task { @MainActor in if let self,self.audioEpoch == current { self.queuedAudio = max(0,self.queuedAudio-1) } }
+        }
+    }
+
+    /// Interleaved little-endian S16 → deinterleaved Float in [-1, 1), vectorised with vDSP.
+    nonisolated static func convertPCM16(_ data: Data, channels: Int, frames: Int, into output: UnsafePointer<UnsafeMutablePointer<Float>>) {
+        precondition(data.count >= frames * channels * 2)
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var scale: Float = 1 / 32768
+            if Int(bitPattern: base) % MemoryLayout<Int16>.alignment == 0 {
+                let samples = base.assumingMemoryBound(to: Int16.self)
+                for channel in 0..<channels {
+                    vDSP_vflt16(samples + channel, vDSP_Stride(channels), output[channel], 1, vDSP_Length(frames))
+                    vDSP_vsmul(output[channel], 1, &scale, output[channel], 1, vDSP_Length(frames))
+                }
+            } else {
+                for i in 0..<frames { for channel in 0..<channels {
+                    let value = raw.loadUnaligned(fromByteOffset: (i * channels + channel) * 2, as: Int16.self)
+                    output[channel][i] = Float(Int16(littleEndian: value)) * scale
+                } }
+            }
         }
     }
 }

@@ -35,7 +35,9 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
     @MainActor private final class TextureSlot {
         let texture: MTLTexture
         var readers = 0
-        init(_ texture:MTLTexture){self.texture=texture}
+        /// Region whose pixels are older than the newest frame; nil once up to date.
+        var stale: PixelRect?
+        init(_ texture:MTLTexture){self.texture=texture;stale = .full(width:texture.width,height:texture.height)}
     }
     private var slots: [TextureSlot] = []
     private var currentSlot: TextureSlot?
@@ -48,10 +50,15 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
     private var pressedKeys = Set<UInt32>()
     private var remoteCursor: NSCursor = .arrow
     private let diagnostics = ProcessInfo.processInfo.environment["SPICE4MAC_DIAGNOSTICS"] == "1"
+    /// Test aid: read every uploaded texture back and compare it with the whole frame.
+    private let verifyUploads = ProcessInfo.processInfo.environment["SPICE4MAC_VERIFY_UPLOADS"] == "1"
+    private var verifiedFrames = 0, mismatchedFrames = 0
     private var sampleStart = CACurrentMediaTime()
     private var receivedFrames = 0, submittedFrames = 0
     private var uploadMilliseconds = 0.0
     private var scrollRemainder: CGFloat = 0
+    /// True while the macOS pointer is detached for SPICE server (relative) mouse mode.
+    private var pointerLocked = false
 
     init() {
         super.init(frame: .zero, device: MTLCreateSystemDefaultDevice())
@@ -125,39 +132,47 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
                 slots = (0..<3).compactMap { _ in device?.makeTexture(descriptor:descriptor).map(TextureSlot.init) }
                 currentSlot = nil
             }
+            // Every slot misses this frame's changes until it is written again.
+            if frame.generation != frameGeneration { for slot in slots { slot.stale = slot.stale.map { $0.union(frame.dirty) } ?? frame.dirty } }
             guard let slot = slots.first(where:{$0.readers == 0}) else {pendingFrame=frame;return}
             pendingFrame=nil
-            let next=slot.texture
-            do {
+            let region = (slot.stale ?? frame.dirty).clamped(width: frame.width, height: frame.height)
+            if !region.isEmpty {
                 frame.pixels.withUnsafeBytes { bytes in
                     if let base = bytes.baseAddress {
-                        next.replace(region: MTLRegionMake2D(0, 0, frame.width, frame.height),
-                                     mipmapLevel: 0, withBytes: base, bytesPerRow: frame.stride)
+                        slot.texture.replace(region: MTLRegionMake2D(region.x, region.y, region.width, region.height), mipmapLevel: 0,
+                                             withBytes: base + region.y * frame.stride + region.x * 4, bytesPerRow: frame.stride)
                     }
                 }
-                receivedFrames += 1
-                uploadMilliseconds += (CACurrentMediaTime()-uploadStart)*1000
-                currentSlot = slot
-                remoteWidth = frame.width
-                remoteHeight = frame.height
-                frameGeneration = frame.generation
-                needsDisplay = true
             }
+            slot.stale = nil
+            if verifyUploads { verify(slot.texture, against: frame) }
+            receivedFrames += 1
+            uploadMilliseconds += (CACurrentMediaTime()-uploadStart)*1000
+            currentSlot = slot
+            remoteWidth = frame.width
+            remoteHeight = frame.height
+            frameGeneration = frame.generation
+            needsDisplay = true
         }
     }
 
-    private var contentRect: CGRect {
-        guard remoteWidth > 0, remoteHeight > 0 else { return bounds }
-        let scale: CGFloat
-        if fitToWindow {
-            scale = min(bounds.width / CGFloat(remoteWidth), bounds.height / CGFloat(remoteHeight))
-        } else {
-            scale = 1 / (window?.backingScaleFactor ?? 1)
+    private func verify(_ texture: MTLTexture, against frame: RemoteFrame) {
+        let row = frame.width * 4
+        var readback = [UInt8](repeating: 0, count: row * frame.height)
+        texture.getBytes(&readback, bytesPerRow: row, from: MTLRegionMake2D(0, 0, frame.width, frame.height), mipmapLevel: 0)
+        let matches = frame.pixels.withUnsafeBytes { bytes in
+            (0..<frame.height).allSatisfy { y in memcmp(readback.withUnsafeBytes { $0.baseAddress! + y * row }, bytes.baseAddress! + y * frame.stride, row) == 0 }
         }
-        let size = CGSize(width: CGFloat(remoteWidth) * scale, height: CGFloat(remoteHeight) * scale)
-        return CGRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
-                      width: size.width, height: size.height)
+        verifiedFrames += 1; if !matches { mismatchedFrames += 1 }
+        if verifiedFrames % 60 == 0 { fputs("verify uploads frames=\(verifiedFrames) mismatched=\(mismatchedFrames)\n", stderr) }
     }
+
+    private var geometry: DisplayGeometry {
+        DisplayGeometry(bounds: bounds, remoteWidth: remoteWidth, remoteHeight: remoteHeight,
+                        fitToWindow: fitToWindow, backingScale: window?.backingScaleFactor ?? 1)
+    }
+    private var contentRect: CGRect { geometry.contentRect }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { needsDisplay = true }
 
@@ -211,6 +226,7 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window == nil { unlockPointer() }
         window?.acceptsMouseMovedEvents = true
         NotificationCenter.default.removeObserver(self)
         if let window {
@@ -222,8 +238,9 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
     @objc private func windowLostFocus() { releaseInput() }
     override func resignFirstResponder() -> Bool { releaseInput(); return super.resignFirstResponder() }
     private func releaseInput() {
+        unlockPointer()
         session?.releaseKeys()
-        for (button, bit) in [(1, 1), (2, 2), (3, 4)] where buttons & bit != 0 {
+        for (button, bit) in [(1, 1), (2, 2), (3, 4), (6, 32), (7, 64)] where buttons & bit != 0 {
             buttons &= ~bit
             session?.mouseButton(button, pressed: false, buttons: buttons)
         }
@@ -232,14 +249,29 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
     }
 
     private func point(_ event: NSEvent) -> (Int, Int)? {
-        let p = convert(event.locationInWindow, from: nil)
-        let rect = contentRect
-        guard remoteWidth > 0, remoteHeight > 0, rect.contains(p) else { return nil }
-        return (min(remoteWidth - 1, max(0, Int((p.x - rect.minX) / rect.width * CGFloat(remoteWidth)))),
-                min(remoteHeight - 1, max(0, Int((p.y - rect.minY) / rect.height * CGFloat(remoteHeight)))))
+        geometry.remotePoint(convert(event.locationInWindow, from: nil)).map { ($0.x, $0.y) }
+    }
+
+    /// In server mouse mode the guest owns the cursor and wants relative motion, so detach the
+    /// macOS pointer from mouse movement; otherwise it leaves the view and motion stops.
+    private func lockPointerIfNeeded() {
+        guard session?.serverMouse == true, !pointerLocked else { return }
+        pointerLocked = CGAssociateMouseAndMouseCursorPosition(0) == .success
+        if pointerLocked { NSCursor.hide() }
+    }
+    func unlockPointer() {
+        guard pointerLocked else { return }
+        pointerLocked = false
+        CGAssociateMouseAndMouseCursorPosition(1)
+        NSCursor.unhide()
     }
 
     override func mouseMoved(with event: NSEvent) {
+        if pointerLocked {
+            guard session?.serverMouse == true else { unlockPointer(); return }
+            session?.relativePointer(dx: Int(event.deltaX), dy: Int(event.deltaY), buttons: buttons)
+            return
+        }
         guard let (x, y) = point(event) else { NSCursor.arrow.set(); return }
         remoteCursor.set()
         if session?.serverMouse == true { session?.relativePointer(dx: Int(event.deltaX), dy: Int(event.deltaY), buttons: buttons) } else { session?.pointer(x: x, y: y, buttons: buttons) }
@@ -250,9 +282,10 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
 
     private func mouse(_ event: NSEvent, button: Int, bit: Int, down: Bool) {
         if down {
-            guard point(event) != nil else { return }
+            guard pointerLocked || point(event) != nil else { return }
             window?.makeFirstResponder(self)
             mouseMoved(with: event)
+            lockPointerIfNeeded()
             buttons |= bit
         } else {
             guard buttons & bit != 0 else { return }
@@ -264,13 +297,22 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
     override func mouseUp(with event: NSEvent) { mouse(event, button: 1, bit: 1, down: false) }
     override func rightMouseDown(with event: NSEvent) { mouse(event, button: 3, bit: 4, down: true) }
     override func rightMouseUp(with event: NSEvent) { mouse(event, button: 3, bit: 4, down: false) }
-    override func otherMouseDown(with event: NSEvent) { mouse(event, button: 2, bit: 2, down: true) }
-    override func otherMouseUp(with event: NSEvent) { mouse(event, button: 2, bit: 2, down: false) }
+    override func otherMouseDown(with event: NSEvent) { let (button, bit) = Self.otherButton(event); mouse(event, button: button, bit: bit, down: true) }
+    override func otherMouseUp(with event: NSEvent) { let (button, bit) = Self.otherButton(event); mouse(event, button: button, bit: bit, down: false) }
+    /// macOS button 2 is middle; 3 and 4 are back/forward, SPICE SIDE (6) and EXTRA (7).
+    /// SPICE has no horizontal wheel buttons, so horizontal scrolling cannot be forwarded.
+    private static func otherButton(_ event: NSEvent) -> (button: Int, bit: Int) {
+        switch event.buttonNumber {
+        case 3: return (6, 32)
+        case 4: return (7, 64)
+        default: return (2, 2)
+        }
+    }
     override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
     override func cursorUpdate(with event: NSEvent) { remoteCursor.set() }
 
     override func scrollWheel(with event: NSEvent) {
-        guard point(event) != nil else { return }
+        guard pointerLocked || point(event) != nil else { return }
         scrollRemainder += event.scrollingDeltaY / (event.hasPreciseScrollingDeltas ? 12 : 1)
         let steps = min(20, Int(abs(scrollRemainder)))
         guard steps > 0 else { return }
@@ -282,12 +324,16 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
         }
     }
 
+    /// Control + Option hands keyboard and mouse back to macOS.
+    private func releaseCaptureIfRequested(_ event: NSEvent) -> Bool {
+        guard event.modifierFlags.contains([.control, .option]) else { return false }
+        releaseInput()
+        window?.makeFirstResponder(nil)
+        return true
+    }
+
     override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.contains([.control, .option]) {
-            releaseInput()
-            window?.makeFirstResponder(nil)
-            return
-        }
+        if releaseCaptureIfRequested(event) { return }
         guard let code = Self.keyCodes[event.keyCode] else { return }
         pressedKeys.insert(code)
         session?.sendKey(code, pressed: true)
@@ -306,10 +352,7 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
         let down = event.modifierFlags.contains(flag) && !pressedKeys.contains(code)
         if down { pressedKeys.insert(code) } else { pressedKeys.remove(code) }
         session?.sendKey(code, pressed: down)
-        if event.modifierFlags.contains([.control, .option]) {
-            releaseInput()
-            window?.makeFirstResponder(nil)
-        }
+        _ = releaseCaptureIfRequested(event)
     }
 
     private func setRemoteCursor(_ cursor: RemoteCursor) {

@@ -44,8 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     var timeout: Timer?
     var didCapture = false
     var finishing = false
-    var exitOnDisconnect: Bool { request.forwardedArguments.contains("--exit-on-disconnect") }
-    var automation: Bool { request.forwardedArguments.contains("--exit-after-connect") || request.forwardedArguments.contains("--screenshot") || request.forwardedArguments.contains("--window-screenshot") || request.forwardedArguments.contains("--timeout") }
+    func flag(_ key:String) -> Bool { request.forwardedArguments.contains(key) }
+    var exitOnDisconnect: Bool { flag("--exit-on-disconnect") }
+    var automation: Bool { ["--exit-after-connect","--screenshot","--window-screenshot","--timeout"].contains(where:flag) }
     init(request:LaunchRequest,options:ConnectionOptions?) { self.request=request; initialOptions=options }
     func argument(_ key:String) -> String? {
         guard let i=request.forwardedArguments.firstIndex(of:key),i+1<request.forwardedArguments.count else{return nil}
@@ -57,12 +58,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         let toolbar=NSToolbar(identifier:"session-toolbar");toolbar.delegate=self;toolbar.displayMode = .iconOnly
         window.toolbar=toolbar;window.toolbarStyle = .unified
         window.title="Spice4Mac";window.titlebarAppearsTransparent=true;window.minSize=NSSize(width:760,height:520)
-        window.contentView=NSHostingView(rootView:ClientView(session:session,initialOptions:initialOptions,autoResizeEnabled:!request.forwardedArguments.contains("--no-auto-resize")))
+        window.contentView=NSHostingView(rootView:ClientView(session:session,initialOptions:initialOptions,autoResizeEnabled:!flag("--no-auto-resize")))
         window.delegate=self;window.center();window.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)
         session.$state.sink { [weak self] state in
-            self?.event("state",["state":state])
-            if state=="Failed", self?.automation==true || self?.exitOnDisconnect==true {self?.finish(2)}
-            if state=="Disconnected", self?.exitOnDisconnect==true {self?.finish(0)}
+            self?.event("state",["state":state.rawValue])
+            if state == .failed, self?.automation==true || self?.exitOnDisconnect==true {self?.finish(2)}
+            // The server or network ended the session; user-initiated disconnects finish(0) directly.
+            if state == .disconnected, self?.exitOnDisconnect==true {self?.finish(5)}
         }.store(in:&subscriptions)
         session.frames.compactMap{$0}.sink { [weak self] frame in
             guard let self,!self.didCapture else{return}
@@ -77,12 +79,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
                     guard let view=self.window.contentView,let bitmap=view.bitmapImageRepForCachingDisplay(in:view.bounds) else {self.finish(3);return}
                     view.cacheDisplay(in:view.bounds,to:bitmap)
                     guard let png=bitmap.representation(using:.png,properties:[:]) else {self.finish(3);return}
-                    do {try png.write(to:URL(fileURLWithPath:path));self.event("window-screenshot",["path":path]);if self.request.forwardedArguments.contains("--exit-after-connect"){self.finish(0)}} catch {self.finish(3)}
+                    do {try png.write(to:URL(fileURLWithPath:path));self.event("window-screenshot",["path":path]);if self.flag("--exit-after-connect"){self.finish(0)}} catch {self.finish(3)}
                 }
-            } else if self.request.forwardedArguments.contains("--exit-after-connect") { self.finish(0) }
+            } else if self.flag("--exit-after-connect") { self.finish(0) }
         }.store(in:&subscriptions)
         if let options=initialOptions { session.connect(options) }
-        if request.forwardedArguments.contains("--fullscreen") {window.toggleFullScreen(nil)}
+        if flag("--fullscreen") {window.toggleFullScreen(nil)}
         if let seconds=argument("--timeout").flatMap(Double.init) ?? (automation ? 20:nil) {
             timeout=Timer.scheduledTimer(withTimeInterval:seconds,repeats:false){[weak self] _ in
                 Task{@MainActor in guard let self else{return};if !self.didCapture {self.event("error",["message":"Connection timed out"]);self.finish(4)}}
@@ -148,16 +150,7 @@ struct ClientView: View {
     @StateObject var profiles = ProfileStore()
     @State var selectedProfile: UUID?
     @State var saveTicket = false
-    @State var importedCA: String?
-    @State var host=""
-    @State var port="5900"
-    @State var ticket=""
-    @State var ca=""
-    @State var subject=""
-    @State var proxy=""
-    @State var tls=true
-    @State var clipboard=true
-    @State var audio=true
+    @State var form=ConnectionForm()
     @State var autoResize=true
     @State var displaySize=CGSize.zero
     @State var validationError:String?
@@ -175,41 +168,38 @@ struct ClientView: View {
                         Section("Saved connections") {
                             Picker("Connection", selection: $selectedProfile) {
                                 Text("Choose a connection").tag(UUID?.none)
-                                ForEach(profiles.profiles) { profile in Text(profile.options.host).tag(Optional(profile.id)) }
+                                ForEach(profiles.profiles) { profile in Text(profile.options.label).tag(Optional(profile.id)) }
                             }.onChange(of: selectedProfile) { _, id in
-                                if let profile = profiles.profiles.first(where: { $0.id == id }) {
-                                    let o = profile.options
-                                    populate(ConnectionOptions(host:o.host,port:o.port,tlsPort:o.tlsPort,password:profile.savedTicket ? CredentialStore.load(account:profile.id.uuidString):nil,caFile:o.caFile,certificateSubject:o.subject,proxy:o.proxy,insecure:o.insecure))
-                                }
+                                if let profile = profiles.profiles.first(where: { $0.id == id }) { populate(profile.connectionOptions()) }
                             }
                             if let selectedProfile { Button("Remove saved connection",role:.destructive) { profiles.remove(selectedProfile);self.selectedProfile=nil } }
                         }
                     }
                     Section("Connection") {
-                        TextField("Host",text:$host)
-                        TextField(tls ? "TLS port":"Port",text:$port)
-                        Toggle("Use TLS",isOn:$tls)
-                        SecureField("Ticket / password",text:$ticket)
+                        TextField("Host",text:$form.host)
+                        TextField(form.tls ? "TLS port":"Port",text:$form.port)
+                        Toggle("Use TLS",isOn:$form.tls)
+                        SecureField("Ticket / password",text:$form.ticket)
                     }
                     Section("Trust & routing") {
-                        TextField("CA certificate path",text:$ca)
-                        TextField("Certificate subject",text:$subject)
-                        TextField("Proxy URL",text:$proxy)
+                        TextField("CA certificate path",text:$form.caFile)
+                        TextField("Certificate subject",text:$form.subject)
+                        TextField("Proxy URL",text:$form.proxy)
                     }
                     Section("Session permissions") {
-                        Toggle("Text clipboard",isOn:$clipboard)
-                        Toggle("Audio output",isOn:$audio)
+                        Toggle("Text clipboard",isOn:$form.clipboard)
+                        Toggle("Audio output",isOn:$form.audio)
                         Toggle("Resize guest with window",isOn:$autoResize)
                         Toggle("Save ticket in Keychain",isOn:$saveTicket)
                     }
                 }.formStyle(.grouped)
-                if !tls {Label("Unencrypted connection",systemImage:"lock.slash").font(.caption).foregroundStyle(.orange)}
+                if !form.tls {Label("Unencrypted connection",systemImage:"lock.slash").font(.caption).foregroundStyle(.orange)}
                 if let message=validationError ?? session.error {Text(message).font(.callout).foregroundStyle(.red).textSelection(.enabled)}
                 HStack {
                     Button("Open .vv…",action:openFile)
-                    Button("Save", action:saveProfile).disabled(host.isEmpty)
+                    Button("Save", action:saveProfile).disabled(form.host.isEmpty)
                     Spacer()
-                    Button("Connect",action:connect).buttonStyle(.borderedProminent).disabled(host.isEmpty)
+                    Button("Connect",action:connect).buttonStyle(.borderedProminent).disabled(form.host.isEmpty)
                 }
                 Text("SPICE \(session.backendVersion) · Apple Silicon").font(.caption2).foregroundStyle(.secondary)
             }.padding(20).frame(width:360)
@@ -221,16 +211,16 @@ struct ClientView: View {
                     RemoteDisplayView(session:session,fitToWindow:session.fitToWindow)
                 } else {
                     VStack(spacing:14){
-                        Image(systemName:session.state=="Failed" ? "network.slash":"display").font(.system(size:48,weight:.light)).foregroundStyle(.secondary)
-                        Text(session.state=="Connecting" || session.state=="Negotiating" ? "Connecting to your workspace…":"Connect to a SPICE desktop").font(.title2)
+                        Image(systemName:session.state == .failed ? "network.slash":"display").font(.system(size:48,weight:.light)).foregroundStyle(.secondary)
+                        Text(session.state.isConnecting ? "Connecting to your workspace…":"Connect to a SPICE desktop").font(.title2)
                         Text("Use a host address or open a .vv connection file.").foregroundStyle(.secondary)
-                        if session.state=="Connecting" || session.state=="Negotiating" {ProgressView()}
+                        if session.state.isConnecting {ProgressView()}
                     }.foregroundStyle(.white)
                 }
             }
             .overlay(alignment:.bottomLeading){
                 if !session.fullScreen {
-                HStack(spacing:8){Circle().fill(session.connected ? .green:.gray).frame(width:6,height:6);Text(session.state);if session.agentConnected {Text("Guest agent").foregroundStyle(.secondary)};Spacer();Text("Control + Option releases input")}
+                HStack(spacing:8){Circle().fill(session.connected ? .green:.gray).frame(width:6,height:6);Text(session.state.rawValue);if session.agentConnected {Text("Guest agent").foregroundStyle(.secondary)};Spacer();Text("Control + Option releases input")}
                     .font(.caption).padding(10).glassEffect().padding(12).allowsHitTesting(false)
                 }
             }
@@ -243,18 +233,15 @@ struct ClientView: View {
         .onChange(of:autoResize) { _, _ in resizeGuest() }
     }
     func resizeGuest(){guard autoResize,session.agentConnected,displaySize.width>0,displaySize.height>0 else{return};session.requestResolution(width:Int(displaySize.width),height:Int(displaySize.height))}
-    func populate(_ o:ConnectionOptions){importedCA=o.caPEM;host=o.host;port=String(o.tlsPort ?? o.port ?? 5900);ticket=o.password ?? "";tls = o.tlsPort != nil;clipboard=o.clipboard;audio=o.audio;ca=o.caFile ?? "";subject=o.certificateSubject ?? "";proxy=o.proxy ?? ""}
+    func populate(_ o:ConnectionOptions){form=ConnectionForm(o)}
     func connect(){
-        guard let p=Int(port) else {validationError="Enter a valid port.";return}
-        let o=ConnectionOptions(host:host,port:tls ? nil:p,tlsPort:tls ? p:nil,password:ticket.isEmpty ? nil:ticket,caFile:ca.isEmpty ? nil:ca,caPEM:ca.isEmpty ? importedCA:nil,certificateSubject:subject.isEmpty ? nil:subject,proxy:proxy.isEmpty ? nil:proxy,insecure:!tls,clipboard:clipboard,audio:audio)
-        do{try o.validate();validationError=nil;lastOptions=o;session.connect(o)}catch{validationError=error.localizedDescription}
+        do{let o=try form.connectionOptions();validationError=nil;lastOptions=o;session.connect(o)}catch{validationError=error.localizedDescription}
     }
     func saveProfile() {
-        guard let p=Int(port), (1...65535).contains(p) else {validationError="Enter a valid port.";return}
-        guard importedCA == nil || !ca.isEmpty else {validationError="To save this connection, first save its inline CA to a PEM file and enter the path.";return}
+        guard form.importedCA == nil || !form.caFile.isEmpty else {validationError="To save this connection, first save its inline CA to a PEM file and enter the path.";return}
         do {
-            let o=ConnectionOptionsForStorage(host:host,port:tls ? nil:p,tlsPort:tls ? p:nil,caFile:ca.isEmpty ? nil:ca,subject:subject.isEmpty ? nil:subject,proxy:proxy.isEmpty ? nil:proxy,insecure:!tls)
-            try profiles.save(o,ticket:saveTicket && !ticket.isEmpty ? ticket:nil);validationError=nil
+            let o=try form.connectionOptions()
+            try profiles.save(ConnectionOptionsForStorage(o),ticket:saveTicket ? o.password:nil);validationError=nil
         } catch {validationError=error.localizedDescription}
     }
     func openFile(){let panel=NSOpenPanel();panel.allowsMultipleSelection=false;panel.canChooseDirectories=false;if panel.runModal() == .OK,let url=panel.url {do{let o=try ConnectionOptions.fromVV(data:readLimited(file:url));populate(o);lastOptions=o;validationError=nil;if o.tlsPort != nil {session.connect(o)}}catch{validationError=error.localizedDescription}}}

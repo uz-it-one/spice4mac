@@ -83,7 +83,9 @@ public struct LaunchRequest: Sendable {
             }
         }
         if request.help || request.version { return request }
-        guard !(request.connectionFromStdin && (source != nil || host != nil || port != nil || tls != nil || request.passwordFromStdin || insecure || ca != nil || subject != nil || proxy != nil || clipboard != nil || audio != nil)) else {
+        let hasConnectionSettings = port != nil || tls != nil || ca != nil || subject != nil || proxy != nil || insecure
+            || clipboard != nil || audio != nil || request.passwordFromStdin
+        guard !(request.connectionFromStdin && (source != nil || host != nil || hasConnectionSettings)) else {
             throw ConnectionError.invalid("--connection-stdin cannot be combined with connection options.")
         }
         guard !(source != nil && host != nil) else { throw ConnectionError.invalid("Choose either a host or a connection file/URI.") }
@@ -100,7 +102,7 @@ public struct LaunchRequest: Sendable {
             request.options?.insecure = insecure
             if let clipboard { request.options?.clipboard = clipboard }
             if let audio { request.options?.audio = audio }
-        } else if !request.connectionFromStdin && (port != nil || tls != nil || ca != nil || subject != nil || proxy != nil || insecure || clipboard != nil || audio != nil || request.passwordFromStdin || request.validateOnly) {
+        } else if !request.connectionFromStdin && (hasConnectionSettings || request.validateOnly) {
             throw ConnectionError.invalid("A connection host, URI, or .vv file is required.")
         }
         return request
@@ -118,8 +120,7 @@ public struct LaunchRequest: Sendable {
             }
             var bytes = Array(ticket.utf8)
             if bytes.last == 10 { bytes.removeLast(); if bytes.last == 13 { bytes.removeLast() } }
-            let ticketValue = String(decoding: bytes, as: UTF8.self)
-            options?.password = ticketValue
+            options?.password = String(decoding: bytes, as: UTF8.self)
         }
         try options?.validate()
         return options

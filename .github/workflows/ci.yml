@@ -1,0 +1,52 @@
+name: CI
+# Build check for every pull request. It never tags, publishes releases or
+# uploads release assets; tagged releases stay in release.yml.
+on:
+  pull_request:
+defaults:
+  run:
+    shell: bash
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Validate version and tracked files
+        run: |
+          test "$(uname -m)" = arm64
+          python3 Build/version.py
+          git diff --exit-code -- Sources/ConnectionCore/AppVersion.swift
+          python3 Build/check-public-files.py
+          xcodebuild -version
+          xcrun --show-sdk-version
+          mkdir -p Artifacts
+      - name: Install native prerequisites
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: brew bundle --file Brewfile
+      # The SPICE server is only needed by the integration fixture, which this job does not run.
+      - name: Build protocol dependencies
+        run: python3 Build/build-dependencies.py 2>&1 | tee Artifacts/dependencies.log
+      - name: Build and package application
+        run: ./Build/build-app.sh 2>&1 | tee Artifacts/build.log
+      - name: Compile test targets
+        run: |
+          . Build/native-env.sh
+          swift build --build-tests --disable-sandbox --build-system native 2>&1 | tee Artifacts/build-tests.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        with:
+          name: ci-build-logs
+          path: Artifacts/*.log
+          retention-days: 7

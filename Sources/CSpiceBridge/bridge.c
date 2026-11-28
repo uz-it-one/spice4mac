@@ -25,6 +25,7 @@ struct SFSession {
  guint frame_source;
  gboolean diagnostics;
  gint64 stats_start, last_present;
+ int dirty_x0, dirty_y0, dirty_x1, dirty_y1; /* union since the last present; empty when x1<=x0 */
  unsigned invalidations, frames;
 };
 static pthread_once_t once = PTHREAD_ONCE_INIT;
@@ -41,41 +42,54 @@ static void emit(SFSession *s,int event,int a,int b,int c,int d,const void *data
 }
 static void state(SFSession *s,const char *text) { emit(s,SF_STATE,0,0,0,0,text,strlen(text)); }
 static void error(SFSession *s,const char *text) { emit(s,SF_ERROR,0,0,0,0,text,strlen(text)); }
+static int is_32bit(int format) { return format==SPICE_SURFACE_FMT_32_xRGB || format==SPICE_SURFACE_FMT_32_ARGB; }
+/* Repack the canvas into tightly packed BGRX8, expanding 16-bit 555/565 pixels. */
+static uint8_t *packed_copy(const SFSession *s) {
+ size_t row=(size_t)s->width*4;
+ uint8_t *copy=g_malloc(row*s->height);
+ int greenBits=s->format==SPICE_SURFACE_FMT_16_565 ? 6:5, greenMax=(1<<greenBits)-1;
+ for(int y=0;y<s->height;y++) {
+  const uint8_t *src=s->canvas+(ptrdiff_t)y*s->stride;
+  uint8_t *dst=copy+(size_t)y*row;
+  if(is_32bit(s->format)) { memcpy(dst,src,row); continue; }
+  for(int x=0;x<s->width;x++) {
+   uint16_t v; memcpy(&v,src+x*2,2);
+   dst[x*4]=(v&31)*255/31;
+   dst[x*4+1]=((v>>5)&greenMax)*255/greenMax;
+   dst[x*4+2]=((v>>(5+greenBits))&31)*255/31; dst[x*4+3]=255;
+  }
+ }
+ return copy;
+}
 static gboolean present(gpointer data) {
  SFSession *s=data; s->frame_source=0;
  if (!s->canvas || s->width<=0 || s->height<=0) return G_SOURCE_REMOVE;
  s->frames++;s->last_present=g_get_monotonic_time();
+ int x0=MAX(0,s->dirty_x0), y0=MAX(0,s->dirty_y0), x1=MIN(s->width,s->dirty_x1), y1=MIN(s->height,s->dirty_y1);
+ if(x1<=x0 || y1<=y0) { x0=0; y0=0; x1=s->width; y1=s->height; }
+ s->dirty_x0=s->dirty_y0=s->dirty_x1=s->dirty_y1=0;
+ emit(s,SF_DIRTY,x0,y0,x1-x0,y1-y0,NULL,0);
  /* The callback copies borrowed bytes synchronously. Avoid an intermediate full
     frame allocation and per-pixel alpha loop for the common packed 32-bit canvas. */
- if ((s->format==SPICE_SURFACE_FMT_32_xRGB || s->format==SPICE_SURFACE_FMT_32_ARGB) && s->stride==s->width*4) {
+ if (is_32bit(s->format) && s->stride==s->width*4) {
   emit(s,SF_FRAME,s->width,s->height,s->stride,0,s->canvas,(size_t)s->stride*s->height);
-  if(!s->ready){s->ready=1;state(s,"Ready");}
-  return G_SOURCE_REMOVE;
+ } else {
+  uint8_t *copy=packed_copy(s);
+  emit(s,SF_FRAME,s->width,s->height,s->width*4,0,copy,(size_t)s->width*s->height*4); g_free(copy);
  }
- size_t size=(size_t)s->width*s->height*4;
- uint8_t *copy=g_malloc(size);
- for(int y=0;y<s->height;y++) {
-  const uint8_t *src=s->canvas+(ptrdiff_t)y*s->stride;
-  uint8_t *dst=copy+(size_t)y*s->width*4;
-  if(s->format==SPICE_SURFACE_FMT_32_xRGB || s->format==SPICE_SURFACE_FMT_32_ARGB) {
-   memcpy(dst,src,(size_t)s->width*4);
-  } else {
-   for(int x=0;x<s->width;x++) {
-    uint16_t v; memcpy(&v,src+x*2,2);
-    int greenBits=s->format==SPICE_SURFACE_FMT_16_565 ? 6:5;
-    dst[x*4]=(v&31)*255/31;
-    dst[x*4+1]=((v>>5)&((1<<greenBits)-1))*255/((1<<greenBits)-1);
-    dst[x*4+2]=((v>>(5+greenBits))&31)*255/31; dst[x*4+3]=255;
-   }
-  }
- }
- emit(s,SF_FRAME,s->width,s->height,s->width*4,0,copy,size); g_free(copy);
  if(!s->ready) {s->ready=1;state(s,"Ready");}
  return G_SOURCE_REMOVE;
 }
+static void add_dirty(SFSession *s,int x,int y,int w,int h) {
+ if(w<=0 || h<=0) return;
+ if(s->dirty_x1<=s->dirty_x0) { s->dirty_x0=x; s->dirty_y0=y; s->dirty_x1=x+w; s->dirty_y1=y+h; return; }
+ s->dirty_x0=MIN(s->dirty_x0,x); s->dirty_y0=MIN(s->dirty_y0,y);
+ s->dirty_x1=MAX(s->dirty_x1,x+w); s->dirty_y1=MAX(s->dirty_y1,y+h);
+}
 static void invalidate(SpiceChannel *ch,int x,int y,int w,int h,gpointer data) {
- (void)ch;(void)x;(void)y;(void)w;(void)h;
+ (void)ch;
  SFSession *s=data;
+ add_dirty(s,x,y,w,h);
  if(s->diagnostics){
   s->invalidations++;gint64 now=g_get_monotonic_time();double elapsed=(now-s->stats_start)/1000000.0;
   if(elapsed>=1){fprintf(stderr,"protocol invalidations_per_sec=%.1f published_fps=%.1f size=%dx%d\n",s->invalidations/elapsed,s->frames/elapsed,s->width,s->height);s->stats_start=now;s->invalidations=0;s->frames=0;}
@@ -88,11 +102,12 @@ static void invalidate(SpiceChannel *ch,int x,int y,int w,int h,gpointer data) {
 static void primary(SpiceChannel *ch,int format,int w,int h,int stride,int shmid,void *pixels,gpointer data) {
  (void)ch;(void)shmid; SFSession *s=data;s->canvas=NULL;
  if(w<=0 || h<=0 || w>8192 || h>8192 || (uint64_t)w*h>MAX_PIXELS ||
-    (format!=SPICE_SURFACE_FMT_32_xRGB && format!=SPICE_SURFACE_FMT_32_ARGB && format!=SPICE_SURFACE_FMT_16_555 && format!=SPICE_SURFACE_FMT_16_565) ||
-    llabs((long long)stride)<(long long)w*((format==SPICE_SURFACE_FMT_32_xRGB||format==SPICE_SURFACE_FMT_32_ARGB)?4:2)) {
+    (!is_32bit(format) && format!=SPICE_SURFACE_FMT_16_555 && format!=SPICE_SURFACE_FMT_16_565) ||
+    llabs((long long)stride)<(long long)w*(is_32bit(format)?4:2)) {
   error(s,"Unsupported or oversized display surface"); return;
  }
  s->width=w;s->height=h;s->stride=stride;s->format=format;s->canvas=pixels;
+ s->dirty_x0=s->dirty_y0=s->dirty_x1=s->dirty_y1=0;
  /* Wait for display-invalidate: a newly allocated surface is not a rendered frame. */
 }
 static void primary_destroy(SpiceChannel *ch,gpointer data) {
@@ -201,22 +216,23 @@ static gboolean destroy(gpointer data){
  emit(s,SF_DESTROYED,0,0,0,0,NULL,0);g_free(s);return G_SOURCE_REMOVE;
 }
 void sf_session_destroy(SFSession*s){if(s)g_idle_add(destroy,s);}
+enum { CMD_KEY=1, CMD_POINTER, CMD_BUTTON, CMD_RELEASE, CMD_RESOLUTION, CMD_CLIPBOARD };
 typedef struct{SFSession*s;int kind,a,b,c,d;GBytes*bytes;} Command;
 static gboolean command(gpointer data){Command*q=data;SFSession*s=q->s;
  switch(q->kind){
- case 1:if(s->inputs&&q->a>=0&&q->a<512){if(q->b)spice_inputs_channel_key_press(s->inputs,q->a);else spice_inputs_channel_key_release(s->inputs,q->a);s->keys[q->a]=q->b;}break;
- case 2:if(s->inputs){if(q->d)spice_inputs_channel_motion(s->inputs,q->a,q->b,q->c);else spice_inputs_channel_position(s->inputs,q->a,q->b,0,q->c);}break;
- case 3:if(s->inputs){if(q->b)spice_inputs_channel_button_press(s->inputs,q->a,q->c);else spice_inputs_channel_button_release(s->inputs,q->a,q->c);}break;
- case 4:release(s);break;
- case 5:if(s->main&&q->a>=320&&q->a<=8192&&q->b>=200&&q->b<=8192&&spice_main_channel_agent_test_capability(s->main,VD_AGENT_CAP_MONITORS_CONFIG)){spice_main_channel_update_display(s->main,0,0,0,q->a,q->b,TRUE);spice_main_channel_send_monitor_config(s->main);}break;
- case 6:if(s->config.clipboard){if(s->clipboard)g_bytes_unref(s->clipboard);s->clipboard=g_bytes_ref(q->bytes);if(s->main){guint32 type=VD_AGENT_CLIPBOARD_UTF8_TEXT;spice_main_channel_clipboard_selection_grab(s->main,VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,&type,1);}}break;
+ case CMD_KEY:if(s->inputs&&q->a>=0&&q->a<512){if(q->b)spice_inputs_channel_key_press(s->inputs,q->a);else spice_inputs_channel_key_release(s->inputs,q->a);s->keys[q->a]=q->b;}break;
+ case CMD_POINTER:if(s->inputs){if(q->d)spice_inputs_channel_motion(s->inputs,q->a,q->b,q->c);else spice_inputs_channel_position(s->inputs,q->a,q->b,0,q->c);}break;
+ case CMD_BUTTON:if(s->inputs){if(q->b)spice_inputs_channel_button_press(s->inputs,q->a,q->c);else spice_inputs_channel_button_release(s->inputs,q->a,q->c);}break;
+ case CMD_RELEASE:release(s);break;
+ case CMD_RESOLUTION:if(s->main&&q->a>=320&&q->a<=8192&&q->b>=200&&q->b<=8192&&spice_main_channel_agent_test_capability(s->main,VD_AGENT_CAP_MONITORS_CONFIG)){spice_main_channel_update_display(s->main,0,0,0,q->a,q->b,TRUE);spice_main_channel_send_monitor_config(s->main);}break;
+ case CMD_CLIPBOARD:if(s->config.clipboard){if(s->clipboard)g_bytes_unref(s->clipboard);s->clipboard=g_bytes_ref(q->bytes);if(s->main){guint32 type=VD_AGENT_CLIPBOARD_UTF8_TEXT;spice_main_channel_clipboard_selection_grab(s->main,VD_AGENT_CLIPBOARD_SELECTION_CLIPBOARD,&type,1);}}break;
  }if(q->bytes)g_bytes_unref(q->bytes);g_free(q);return G_SOURCE_REMOVE;
 }
 static void enqueue(SFSession*s,int kind,int a,int b,int c,int d,GBytes*bytes){if(!s)return;Command*q=g_new0(Command,1);*q=(Command){s,kind,a,b,c,d,bytes};g_idle_add(command,q);}
-void sf_key(SFSession*s,uint32_t code,int pressed){enqueue(s,1,code,pressed,0,0,NULL);}
-void sf_pointer(SFSession*s,int x,int y,int buttons,int relative){enqueue(s,2,x,y,buttons,relative,NULL);}
-void sf_button(SFSession*s,int button,int pressed,int buttons){enqueue(s,3,button,pressed,buttons,0,NULL);}
-void sf_release_keys(SFSession*s){enqueue(s,4,0,0,0,0,NULL);}
-void sf_resolution(SFSession*s,int w,int h){enqueue(s,5,w,h,0,0,NULL);}
-void sf_clipboard(SFSession*s,const uint8_t*text,size_t size){if(s&&size<=MAX_CLIPBOARD)enqueue(s,6,0,0,0,0,g_bytes_new(text,size));}
+void sf_key(SFSession*s,uint32_t code,int pressed){enqueue(s,CMD_KEY,code,pressed,0,0,NULL);}
+void sf_pointer(SFSession*s,int x,int y,int buttons,int relative){enqueue(s,CMD_POINTER,x,y,buttons,relative,NULL);}
+void sf_button(SFSession*s,int button,int pressed,int buttons){enqueue(s,CMD_BUTTON,button,pressed,buttons,0,NULL);}
+void sf_release_keys(SFSession*s){enqueue(s,CMD_RELEASE,0,0,0,0,NULL);}
+void sf_resolution(SFSession*s,int w,int h){enqueue(s,CMD_RESOLUTION,w,h,0,0,NULL);}
+void sf_clipboard(SFSession*s,const uint8_t*text,size_t size){if(s&&size<=MAX_CLIPBOARD)enqueue(s,CMD_CLIPBOARD,0,0,0,0,g_bytes_new(text,size));}
 const char*sf_backend_version(void){return spice_util_get_version_string();}

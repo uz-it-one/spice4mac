@@ -11,7 +11,7 @@ python3 Build/archive-app.py
 python3 Build/archive-sources.py
 ```
 
-앱은 `dist/Spice4Mac.app`, CLI는 `dist/spice4mac`에 생성됩니다. 빌드 도구·네이티브 소스는 `.build-native`에 설치됩니다. Homebrew 전이 의존성의 버전은 설치 환경에 따라 달라질 수 있습니다. 바이너리별 아키텍처·최소 OS·소스 해시는 공개 경로 정보만 담은 `dist/native-audit.json`에 기록합니다.
+앱은 `dist/Spice4Mac.app`, CLI는 `dist/spice4mac`에 생성됩니다. 빌드 도구·네이티브 소스는 `.build-native`에 설치됩니다. Homebrew 전이 의존성의 버전은 설치 환경에 따라 달라질 수 있습니다. 바이너리별 아키텍처·최소 OS·소스 해시는 공개 경로 정보만 담은 `dist/native-audit.json`에 기록합니다. 번들에 포함된 라이브러리가 지원 최소 버전(macOS 26.0)보다 새 OS를 요구하면 패키징이 실패합니다. 의도적으로 최소 버전을 올릴 때만 `SPICE4MAC_ALLOW_MINIMUM_OS=27.0`처럼 지정하십시오.
 
 GUI와 Metal 시험에는 로그인된 그래픽 세션이 필요합니다. 일반 CI의 필수 검사와 구분합니다.
 
@@ -32,6 +32,8 @@ git push origin 0.1.0
 ```
 
 `Release` workflow는 **태그 이벤트의 커밋 SHA를 checkout**하고, 태그와 VERSION 일치 여부를 검사합니다. arm64 macOS runner에서 의존성·앱을 빌드하고 Swift/upstream/SPICE 통합 시험을 실행한 후 앱·CLI ZIP, 의존성 소스, SHA-256, native audit를 GitHub Release에 게시합니다. 태그를 붙인 커밋의 코드를 빌드하며 main의 최신 코드를 대신 사용하지 않습니다.
+
+모든 pull request에서는 `CI` workflow가 의존성·앱 빌드와 시험 타깃 컴파일만 검사합니다. 시험 실행, 태그 생성, 릴리스 게시, 릴리스 자산 업로드는 하지 않으며 실패 시에만 빌드 로그를 7일간 보관합니다.
 
 수동 `workflow_dispatch`는 릴리스 전 빌드 검증용이며 **릴리스를 게시하지 않습니다**. 일반 branch push에는 실행하지 않습니다. 실패한 빌드는 릴리스를 공개하지 않고 로그를 Actions artifact에 남깁니다. 배포에는 job 범위의 `contents: write` 권한과 기본 GITHUB_TOKEN만 사용하며 별도 토큰이 필요하지 않습니다.
 

@@ -100,4 +100,35 @@ final class ConnectionCoreTests: XCTestCase {
         XCTAssertThrowsError(try readLimited(file: path, limit: 10))
         XCTAssertEqual(try readLimited(file: path, limit: 12).count, 12)
     }
+
+    func testConnectionFormBuildsValidatedOptions() throws {
+        var form = ConnectionForm()
+        form.host = "vm.example"; form.port = "5901"; form.ticket = "secret"; form.subject = "CN=vm.example"
+        let tls = try form.connectionOptions()
+        XCTAssertEqual(tls.tlsPort, 5901)
+        XCTAssertNil(tls.port)
+        XCTAssertFalse(tls.insecure)
+        XCTAssertEqual(tls.password, "secret")
+        XCTAssertNil(tls.proxy, "Empty fields must become nil, not empty strings")
+        XCTAssertEqual(ConnectionForm(tls), form, "Options round-trip into the same form")
+
+        form.tls = false
+        let plain = try form.connectionOptions()
+        XCTAssertEqual(plain.port, 5901)
+        XCTAssertTrue(plain.insecure, "Turning TLS off in the form is the explicit plaintext consent")
+
+        for port in ["", "0", "65536", "59a", "+5900", " 5900"] {
+            form.port = port
+            XCTAssertThrowsError(try form.connectionOptions(), port)
+        }
+    }
+
+    func testConnectionFormPrefersCAPathOverImportedPEM() throws {
+        var form = ConnectionForm(try ConnectionOptions.fromVV(data: Data("[virt-viewer]\ntype=spice\nhost=example\ntls-port=5901\nca=PEM\n".utf8)))
+        XCTAssertEqual(try form.connectionOptions().caPEM, "PEM")
+        form.caFile = "/path/ca.pem"
+        let options = try form.connectionOptions()
+        XCTAssertEqual(options.caFile, "/path/ca.pem")
+        XCTAssertNil(options.caPEM, "Only one CA source may reach the session")
+    }
 }
