@@ -171,7 +171,7 @@ public final class NativeSession: ObservableObject {
     private func stopAudio() { audioEpoch = UUID(); audioPlayer?.stop(); audioEngine?.stop(); audioPlayer = nil; audioEngine = nil; audioFormat = nil; queuedAudio = 0 }
     private func playAudio(_ data:Data) {
         guard let player = audioPlayer,let format = audioFormat,queuedAudio < 12 else { return }
-        let channels = Int(format.channelCount), count = data.count / (2 * Int(format.channelCount))
+        let channels = Int(format.channelCount), count = data.count / (2 * channels)
         guard count > 0,let buffer = AVAudioPCMBuffer(pcmFormat:format,frameCapacity:AVAudioFrameCount(count)),let output = buffer.floatChannelData else { return }
         buffer.frameLength = AVAudioFrameCount(count)
         data.withUnsafeBytes { raw in

@@ -127,22 +127,19 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
             }
             guard let slot = slots.first(where:{$0.readers == 0}) else {pendingFrame=frame;return}
             pendingFrame=nil
-            let next=slot.texture
-            do {
-                frame.pixels.withUnsafeBytes { bytes in
-                    if let base = bytes.baseAddress {
-                        next.replace(region: MTLRegionMake2D(0, 0, frame.width, frame.height),
-                                     mipmapLevel: 0, withBytes: base, bytesPerRow: frame.stride)
-                    }
+            frame.pixels.withUnsafeBytes { bytes in
+                if let base = bytes.baseAddress {
+                    slot.texture.replace(region: MTLRegionMake2D(0, 0, frame.width, frame.height),
+                                         mipmapLevel: 0, withBytes: base, bytesPerRow: frame.stride)
                 }
-                receivedFrames += 1
-                uploadMilliseconds += (CACurrentMediaTime()-uploadStart)*1000
-                currentSlot = slot
-                remoteWidth = frame.width
-                remoteHeight = frame.height
-                frameGeneration = frame.generation
-                needsDisplay = true
             }
+            receivedFrames += 1
+            uploadMilliseconds += (CACurrentMediaTime()-uploadStart)*1000
+            currentSlot = slot
+            remoteWidth = frame.width
+            remoteHeight = frame.height
+            frameGeneration = frame.generation
+            needsDisplay = true
         }
     }
 
@@ -282,12 +279,16 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
         }
     }
 
+    /// Control + Option hands keyboard and mouse back to macOS.
+    private func releaseCaptureIfRequested(_ event: NSEvent) -> Bool {
+        guard event.modifierFlags.contains([.control, .option]) else { return false }
+        releaseInput()
+        window?.makeFirstResponder(nil)
+        return true
+    }
+
     override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.contains([.control, .option]) {
-            releaseInput()
-            window?.makeFirstResponder(nil)
-            return
-        }
+        if releaseCaptureIfRequested(event) { return }
         guard let code = Self.keyCodes[event.keyCode] else { return }
         pressedKeys.insert(code)
         session?.sendKey(code, pressed: true)
@@ -306,10 +307,7 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
         let down = event.modifierFlags.contains(flag) && !pressedKeys.contains(code)
         if down { pressedKeys.insert(code) } else { pressedKeys.remove(code) }
         session?.sendKey(code, pressed: down)
-        if event.modifierFlags.contains([.control, .option]) {
-            releaseInput()
-            window?.makeFirstResponder(nil)
-        }
+        _ = releaseCaptureIfRequested(event)
     }
 
     private func setRemoteCursor(_ cursor: RemoteCursor) {

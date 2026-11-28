@@ -44,8 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     var timeout: Timer?
     var didCapture = false
     var finishing = false
-    var exitOnDisconnect: Bool { request.forwardedArguments.contains("--exit-on-disconnect") }
-    var automation: Bool { request.forwardedArguments.contains("--exit-after-connect") || request.forwardedArguments.contains("--screenshot") || request.forwardedArguments.contains("--window-screenshot") || request.forwardedArguments.contains("--timeout") }
+    func flag(_ key:String) -> Bool { request.forwardedArguments.contains(key) }
+    var exitOnDisconnect: Bool { flag("--exit-on-disconnect") }
+    var automation: Bool { ["--exit-after-connect","--screenshot","--window-screenshot","--timeout"].contains(where:flag) }
     init(request:LaunchRequest,options:ConnectionOptions?) { self.request=request; initialOptions=options }
     func argument(_ key:String) -> String? {
         guard let i=request.forwardedArguments.firstIndex(of:key),i+1<request.forwardedArguments.count else{return nil}
@@ -57,7 +58,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         let toolbar=NSToolbar(identifier:"session-toolbar");toolbar.delegate=self;toolbar.displayMode = .iconOnly
         window.toolbar=toolbar;window.toolbarStyle = .unified
         window.title="Spice4Mac";window.titlebarAppearsTransparent=true;window.minSize=NSSize(width:760,height:520)
-        window.contentView=NSHostingView(rootView:ClientView(session:session,initialOptions:initialOptions,autoResizeEnabled:!request.forwardedArguments.contains("--no-auto-resize")))
+        window.contentView=NSHostingView(rootView:ClientView(session:session,initialOptions:initialOptions,autoResizeEnabled:!flag("--no-auto-resize")))
         window.delegate=self;window.center();window.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)
         session.$state.sink { [weak self] state in
             self?.event("state",["state":state])
@@ -77,12 +78,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
                     guard let view=self.window.contentView,let bitmap=view.bitmapImageRepForCachingDisplay(in:view.bounds) else {self.finish(3);return}
                     view.cacheDisplay(in:view.bounds,to:bitmap)
                     guard let png=bitmap.representation(using:.png,properties:[:]) else {self.finish(3);return}
-                    do {try png.write(to:URL(fileURLWithPath:path));self.event("window-screenshot",["path":path]);if self.request.forwardedArguments.contains("--exit-after-connect"){self.finish(0)}} catch {self.finish(3)}
+                    do {try png.write(to:URL(fileURLWithPath:path));self.event("window-screenshot",["path":path]);if self.flag("--exit-after-connect"){self.finish(0)}} catch {self.finish(3)}
                 }
-            } else if self.request.forwardedArguments.contains("--exit-after-connect") { self.finish(0) }
+            } else if self.flag("--exit-after-connect") { self.finish(0) }
         }.store(in:&subscriptions)
         if let options=initialOptions { session.connect(options) }
-        if request.forwardedArguments.contains("--fullscreen") {window.toggleFullScreen(nil)}
+        if flag("--fullscreen") {window.toggleFullScreen(nil)}
         if let seconds=argument("--timeout").flatMap(Double.init) ?? (automation ? 20:nil) {
             timeout=Timer.scheduledTimer(withTimeInterval:seconds,repeats:false){[weak self] _ in
                 Task{@MainActor in guard let self else{return};if !self.didCapture {self.event("error",["message":"Connection timed out"]);self.finish(4)}}
@@ -164,6 +165,7 @@ struct ClientView: View {
     @State var lastOptions:ConnectionOptions?
     let initialOptions:ConnectionOptions?
     var autoResizeEnabled=true
+    var connecting:Bool { session.state=="Connecting" || session.state=="Negotiating" }
     var body:some View {
         HStack(spacing:0) {
             if !session.connected && !session.fullScreen {
@@ -177,10 +179,7 @@ struct ClientView: View {
                                 Text("Choose a connection").tag(UUID?.none)
                                 ForEach(profiles.profiles) { profile in Text(profile.options.host).tag(Optional(profile.id)) }
                             }.onChange(of: selectedProfile) { _, id in
-                                if let profile = profiles.profiles.first(where: { $0.id == id }) {
-                                    let o = profile.options
-                                    populate(ConnectionOptions(host:o.host,port:o.port,tlsPort:o.tlsPort,password:profile.savedTicket ? CredentialStore.load(account:profile.id.uuidString):nil,caFile:o.caFile,certificateSubject:o.subject,proxy:o.proxy,insecure:o.insecure))
-                                }
+                                if let profile = profiles.profiles.first(where: { $0.id == id }) { populate(profile.connectionOptions()) }
                             }
                             if let selectedProfile { Button("Remove saved connection",role:.destructive) { profiles.remove(selectedProfile);self.selectedProfile=nil } }
                         }
@@ -222,9 +221,9 @@ struct ClientView: View {
                 } else {
                     VStack(spacing:14){
                         Image(systemName:session.state=="Failed" ? "network.slash":"display").font(.system(size:48,weight:.light)).foregroundStyle(.secondary)
-                        Text(session.state=="Connecting" || session.state=="Negotiating" ? "Connecting to your workspace…":"Connect to a SPICE desktop").font(.title2)
+                        Text(connecting ? "Connecting to your workspace…":"Connect to a SPICE desktop").font(.title2)
                         Text("Use a host address or open a .vv connection file.").foregroundStyle(.secondary)
-                        if session.state=="Connecting" || session.state=="Negotiating" {ProgressView()}
+                        if connecting {ProgressView()}
                     }.foregroundStyle(.white)
                 }
             }
@@ -246,16 +245,20 @@ struct ClientView: View {
     func populate(_ o:ConnectionOptions){importedCA=o.caPEM;host=o.host;port=String(o.tlsPort ?? o.port ?? 5900);ticket=o.password ?? "";tls = o.tlsPort != nil;clipboard=o.clipboard;audio=o.audio;ca=o.caFile ?? "";subject=o.certificateSubject ?? "";proxy=o.proxy ?? ""}
     func connect(){
         guard let p=Int(port) else {validationError="Enter a valid port.";return}
-        let o=ConnectionOptions(host:host,port:tls ? nil:p,tlsPort:tls ? p:nil,password:ticket.isEmpty ? nil:ticket,caFile:ca.isEmpty ? nil:ca,caPEM:ca.isEmpty ? importedCA:nil,certificateSubject:subject.isEmpty ? nil:subject,proxy:proxy.isEmpty ? nil:proxy,insecure:!tls,clipboard:clipboard,audio:audio)
+        let o=ConnectionOptions(host:host,port:tls ? nil:p,tlsPort:tls ? p:nil,password:ticket.nilIfEmpty,caFile:ca.nilIfEmpty,caPEM:ca.isEmpty ? importedCA:nil,certificateSubject:subject.nilIfEmpty,proxy:proxy.nilIfEmpty,insecure:!tls,clipboard:clipboard,audio:audio)
         do{try o.validate();validationError=nil;lastOptions=o;session.connect(o)}catch{validationError=error.localizedDescription}
     }
     func saveProfile() {
         guard let p=Int(port), (1...65535).contains(p) else {validationError="Enter a valid port.";return}
         guard importedCA == nil || !ca.isEmpty else {validationError="To save this connection, first save its inline CA to a PEM file and enter the path.";return}
         do {
-            let o=ConnectionOptionsForStorage(host:host,port:tls ? nil:p,tlsPort:tls ? p:nil,caFile:ca.isEmpty ? nil:ca,subject:subject.isEmpty ? nil:subject,proxy:proxy.isEmpty ? nil:proxy,insecure:!tls)
+            let o=ConnectionOptionsForStorage(host:host,port:tls ? nil:p,tlsPort:tls ? p:nil,caFile:ca.nilIfEmpty,subject:subject.nilIfEmpty,proxy:proxy.nilIfEmpty,insecure:!tls)
             try profiles.save(o,ticket:saveTicket && !ticket.isEmpty ? ticket:nil);validationError=nil
         } catch {validationError=error.localizedDescription}
     }
     func openFile(){let panel=NSOpenPanel();panel.allowsMultipleSelection=false;panel.canChooseDirectories=false;if panel.runModal() == .OK,let url=panel.url {do{let o=try ConnectionOptions.fromVV(data:readLimited(file:url));populate(o);lastOptions=o;validationError=nil;if o.tlsPort != nil {session.connect(o)}}catch{validationError=error.localizedDescription}}}
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
