@@ -3,6 +3,7 @@
 import hashlib,json,os,pathlib,plistlib,re,shutil,subprocess
 from version import version
 ROOT=pathlib.Path(__file__).resolve().parents[1]
+DECLARED_MINIMUM_OS='26.0'
 DIST=ROOT/'dist'; APP=DIST/'Spice4Mac.app'; FW=APP/'Contents/Frameworks'; RES=APP/'Contents/Resources'
 def run(args): return subprocess.check_output(list(map(str,args)),text=True,stderr=subprocess.STDOUT)
 def dependencies(path):
@@ -41,8 +42,10 @@ def main():
                 mapped[name]=src;copy=FW/name;shutil.copy2(src,copy);queue.append((src,copy))
             run(['install_name_tool','-change',dep,'@rpath/'+name,dest])
         if dest.suffix=='.dylib':run(['install_name_tool','-id','@rpath/'+dest.name,dest])
+        # Keep only bundle-relative search paths. Absolute ones (Homebrew, the native prefix
+        # wherever it lives, symlinked checkouts) would load development copies first.
         for rpath in set(rpaths(dest)):
-            if rpath.startswith('/opt/') or str(ROOT) in rpath:run(['install_name_tool','-delete_rpath',rpath,dest])
+            if not rpath.startswith('@'):run(['install_name_tool','-delete_rpath',rpath,dest])
         if dest==target:run(['install_name_tool','-add_rpath','@executable_path/../Frameworks',dest])
         if dest.parent.name=='gstreamer-1.0':run(['install_name_tool','-add_rpath','@loader_path/../../Frameworks',dest])
         load=run(['otool','-l',dest]);versions=re.findall(r'\bminos ([\d.]+)',load)
@@ -51,7 +54,14 @@ def main():
         audit.append({'file':str(dest.relative_to(APP)),'source':str(original),'architectures':arch,'minimum_os':versions,'sha256_source':hashlib.sha256(original.read_bytes()).hexdigest()})
         run(['strip','-S',dest])
         run(['codesign','--force','--sign','-',dest])
-    minimum=max(['26.0']+[v for row in audit for v in row['minimum_os']],key=lambda s:tuple(map(int,s.split('.'))))
+    key=lambda s:tuple(map(int,s.split('.')))
+    minimum=max([DECLARED_MINIMUM_OS]+[v for row in audit for v in row['minimum_os']],key=key)
+    # A newer Homebrew bottle or runner must not silently drop supported macOS releases.
+    allowed=os.environ.get('SPICE4MAC_ALLOW_MINIMUM_OS',DECLARED_MINIMUM_OS)
+    if key(minimum)>key(allowed):
+        newer=sorted({row['file'] for row in audit if any(key(v)>key(allowed) for v in row['minimum_os'])})
+        raise RuntimeError(f'Bundle requires macOS {minimum}, above the supported {allowed}: '+', '.join(newer)+
+                           '. Rebuild those libraries for the supported release, or set SPICE4MAC_ALLOW_MINIMUM_OS to accept it.')
     info={'CFBundleExecutable':'Spice4MacApp','CFBundleIdentifier':'org.spice4mac.client','CFBundleName':'Spice4Mac','CFBundleDisplayName':'Spice4Mac','CFBundlePackageType':'APPL','CFBundleShortVersionString':version(),'CFBundleVersion':version(),'LSMinimumSystemVersion':minimum,'NSHighResolutionCapable':True,'NSPrincipalClass':'NSApplication'}
     (APP/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
     # Bundle CA roots explicitly; OpenSSL's Homebrew default path is not portable.
@@ -77,6 +87,7 @@ def main():
     shutil.copy2(ROOT/'.build/release/spice4mac',DIST/'spice4mac');run(['strip','-S',DIST/'spice4mac']);run(['codesign','--force','--sign','-',DIST/'spice4mac'])
     for _,dest in queue:
         if any(not system(d) and not d.startswith('@rpath/') for d in dependencies(dest)):raise RuntimeError('Non-relocatable dependency: '+str(dest))
+        if any(not r.startswith('@') for r in rpaths(dest)):raise RuntimeError('Absolute rpath left in: '+str(dest))
     (DIST/'native-audit.json').write_text(json.dumps({'minimum_os':minimum,'binaries':audit},indent=2)+'\n')
     print('Packaged',APP,'minimum OS',minimum,'native libraries',len(mapped))
 if __name__=='__main__':main()

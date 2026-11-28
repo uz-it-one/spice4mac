@@ -11,7 +11,7 @@ python3 Build/archive-app.py
 python3 Build/archive-sources.py
 ```
 
-앱은 `dist/Spice4Mac.app`, CLI는 `dist/spice4mac`에 생성됩니다. 빌드 도구·네이티브 소스는 `.build-native`에 설치됩니다. Homebrew 전이 의존성의 버전은 설치 환경에 따라 달라질 수 있습니다. 바이너리별 아키텍처·최소 OS·소스 해시는 공개 경로 정보만 담은 `dist/native-audit.json`에 기록합니다.
+앱은 `dist/Spice4Mac.app`, CLI는 `dist/spice4mac`에 생성됩니다. 빌드 도구·네이티브 소스는 `.build-native`에 설치됩니다. Homebrew 전이 의존성의 버전은 설치 환경에 따라 달라질 수 있습니다. 바이너리별 아키텍처·최소 OS·소스 해시는 공개 경로 정보만 담은 `dist/native-audit.json`에 기록합니다. 번들에 포함된 라이브러리가 지원 최소 버전(macOS 26.0)보다 새 OS를 요구하면 패키징이 실패합니다. 의도적으로 최소 버전을 올릴 때만 `SPICE4MAC_ALLOW_MINIMUM_OS=27.0`처럼 지정하십시오.
 
 GUI와 Metal 시험에는 로그인된 그래픽 세션이 필요합니다. 일반 CI의 필수 검사와 구분합니다.
 

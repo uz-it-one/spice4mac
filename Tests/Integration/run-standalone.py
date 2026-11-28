@@ -10,7 +10,9 @@ with tempfile.TemporaryDirectory(prefix='spice4mac-isolated-') as temporary:
     folder=pathlib.Path(temporary)
     subprocess.run(['ditto','-x','-k',str(ROOT/'dist'/f'Spice4Mac-{version()}-arm64.zip'),temporary],check=True)
     package=folder/f'Spice4Mac-{version()}-arm64'
-    profile='(version 1)(allow default)(deny file-read* (subpath "/opt/homebrew") (subpath '+json.dumps(str(ROOT/'.build-native/prefix'))+'))'
+    # Deny the prefix both as spelled and as resolved, so a symlinked prefix cannot leak through.
+    prefixes={str(ROOT/'.build-native/prefix'),str((ROOT/'.build-native/prefix').resolve())}
+    profile='(version 1)(allow default)(deny file-read* (subpath "/opt/homebrew")'+''.join(' (subpath '+json.dumps(p)+')' for p in sorted(prefixes))+')'
     with (folder/'server.log').open('w') as log:
         server=subprocess.Popen([str(ROOT/'.build-native/spice-fixture'),str(port)],stdout=log,stderr=log)
         try:
