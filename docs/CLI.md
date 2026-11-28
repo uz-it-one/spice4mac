@@ -36,4 +36,6 @@ SPICE4MAC_DIAGNOSTICS=1 ./spice4mac connection.vv 2> /tmp/spice4mac-display.log
 
 문제를 보고할 때 게스트 OS, 가상 그래픽 장치, 해상도와 진단 로그를 함께 알려 주십시오. 연결 파일·인증서·ticket·클립보드 내용은 첨부하지 마십시오. 진단 로그는 화면 내용과 비밀번호를 기록하지 않습니다.
 
+`SPICE4MAC_VERIFY_UPLOADS=1`을 함께 지정하면 GPU 텍스처를 매 프레임 읽어 원격 framebuffer와 비교하고, 불일치 수를 60프레임마다 stderr에 기록합니다(부분 갱신 검증용, 성능 측정 시에는 끄십시오).
+
 `--screenshot`은 원격 framebuffer를 저장합니다. 개발 진단용 `--window-screenshot`은 AppKit view cache 방식이므로 Metal과 일부 시스템 material이 빠질 수 있습니다.

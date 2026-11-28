@@ -50,6 +50,9 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
     private var pressedKeys = Set<UInt32>()
     private var remoteCursor: NSCursor = .arrow
     private let diagnostics = ProcessInfo.processInfo.environment["SPICE4MAC_DIAGNOSTICS"] == "1"
+    /// Test aid: read every uploaded texture back and compare it with the whole frame.
+    private let verifyUploads = ProcessInfo.processInfo.environment["SPICE4MAC_VERIFY_UPLOADS"] == "1"
+    private var verifiedFrames = 0, mismatchedFrames = 0
     private var sampleStart = CACurrentMediaTime()
     private var receivedFrames = 0, submittedFrames = 0
     private var uploadMilliseconds = 0.0
@@ -143,6 +146,7 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
                 }
             }
             slot.stale = nil
+            if verifyUploads { verify(slot.texture, against: frame) }
             receivedFrames += 1
             uploadMilliseconds += (CACurrentMediaTime()-uploadStart)*1000
             currentSlot = slot
@@ -151,6 +155,17 @@ final class SpiceMetalView: MTKView, MTKViewDelegate {
             frameGeneration = frame.generation
             needsDisplay = true
         }
+    }
+
+    private func verify(_ texture: MTLTexture, against frame: RemoteFrame) {
+        let row = frame.width * 4
+        var readback = [UInt8](repeating: 0, count: row * frame.height)
+        texture.getBytes(&readback, bytesPerRow: row, from: MTLRegionMake2D(0, 0, frame.width, frame.height), mipmapLevel: 0)
+        let matches = frame.pixels.withUnsafeBytes { bytes in
+            (0..<frame.height).allSatisfy { y in memcmp(readback.withUnsafeBytes { $0.baseAddress! + y * row }, bytes.baseAddress! + y * frame.stride, row) == 0 }
+        }
+        verifiedFrames += 1; if !matches { mismatchedFrames += 1 }
+        if verifiedFrames % 60 == 0 { fputs("verify uploads frames=\(verifiedFrames) mismatched=\(mismatchedFrames)\n", stderr) }
     }
 
     private var geometry: DisplayGeometry {
