@@ -33,6 +33,8 @@ git push origin 0.1.0
 
 `Release` workflow는 **태그 이벤트의 커밋 SHA를 checkout**하고, 태그와 VERSION 일치 여부를 검사합니다. arm64 macOS runner에서 의존성·앱을 빌드하고 Swift/upstream/SPICE 통합 시험을 실행한 후 앱·CLI ZIP, 의존성 소스, SHA-256, native audit를 GitHub Release에 게시합니다. 태그를 붙인 커밋의 코드를 빌드하며 main의 최신 코드를 대신 사용하지 않습니다.
 
+모든 pull request에서는 `CI` workflow가 의존성·앱 빌드와 시험 타깃 컴파일만 검사합니다. 시험 실행, 태그 생성, 릴리스 게시, 릴리스 자산 업로드는 하지 않으며 실패 시에만 빌드 로그를 7일간 보관합니다.
+
 수동 `workflow_dispatch`는 릴리스 전 빌드 검증용이며 **릴리스를 게시하지 않습니다**. 일반 branch push에는 실행하지 않습니다. 실패한 빌드는 릴리스를 공개하지 않고 로그를 Actions artifact에 남깁니다. 배포에는 job 범위의 `contents: write` 권한과 기본 GITHUB_TOKEN만 사용하며 별도 토큰이 필요하지 않습니다.
 
 현재 릴리스는 ad-hoc 서명이며 Developer ID 서명·공증은 수행하지 않습니다. 의존성 소스는 함께 배포하며, 기존 공개 릴리스 자산을 재실행으로 덮어쓰지 않습니다.
