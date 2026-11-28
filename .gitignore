@@ -44,3 +44,5 @@ docs/implementation-status.md
 *.db
 *.zip
 *.dmg
+# Local review reports and improvement proposals (not published)
+reports/
